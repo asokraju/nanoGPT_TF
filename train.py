@@ -1,5 +1,4 @@
 from tensorflow.keras import layers
-from tensorflow.keras.layers import Dropout
 import tensorflow as tf
 from dataclasses import dataclass
 
@@ -8,11 +7,11 @@ class GPTConfig:
     block_size: int = 1024
     vocab_size: int = 50304  # GPT-2 vocab_size of 50257, padded up to the nearest multiple of 64 for efficiency
     n_layer: int = 12
-    n_head: int = 12 # number of attention heads 
-    n_embd: int = 768 # embedding size of the input
+    n_head: int = 12  # number of attention heads
+    n_embd: int = 768  # embedding size of the input
     dropout: float = 0.0
     bias: bool = True  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
-    epsilon: float = 1e-5 # epsilon value of layer normalization
+    epsilon: float = 1e-5  # epsilon value of layer normalization
 
 class MultiHeadAttention(layers.Layer):
     def __init__(self, config):
@@ -64,7 +63,7 @@ class MultiHeadAttention(layers.Layer):
         # Transpose and reshape the output to match the original shape
         out = tf.transpose(out, perm=[0, 2, 1, 3])  # Output shape: (B, T, num_heads, head_size)
         out = tf.reshape(out, (B, T, -1))  # Output shape: (B, T, C) - note that C = num_heads * head_size = n_embd
-        out = self.resid_dropout(out)  # Regularization step 2  - input and output of the NN are of same dimensions
+        out = self.resid_dropout(out)  # Regularization step 2
         return out
 
 class MLP(layers.Layer):
@@ -85,19 +84,23 @@ class Block(layers.Layer):
     def __init__(self, config):
         super(Block, self).__init__()
 
-        # Layer normalizing the input data as the number of features increases overtime
-        self.ln_1 = tf.keras.layers.LayerNormalization(epsilon=config.epsilon, center=False, scale=True)
+        # Layer normalizing the input data as the number of features increases over time
+        self.ln_1 = layers.LayerNormalization(epsilon=config.epsilon, center=False, scale=True)
         self.attn = MultiHeadAttention(config)
-        self.ln_2 = tf.keras.layers.LayerNormalization(epsilon=config.epsilon, center=False, scale=True)
+        self.ln_2 = layers.LayerNormalization(epsilon=config.epsilon, center=False, scale=True)
         self.mlp = MLP(config)
-    def call(self):
-        # 1. input data is layer normalized : Layer normalizing the input data as the number of features increases overtime
-        # 2. fed through attention network : we get the attention scores or weighted values
-        # 3. added to the input : reduces vanishing gradient issues
-        x = x + self.attn(self.ln_1(x))
-        # 4. again layer normalized the data
-        # 5. final pass through a multi layer perceptron : we are learning the features
-        # 6. again added to tthe input
-        x = x + self.mlp(self.ln_2(x))
-        return x
+    
+    def call(self, x):
+        # 1. Input data is layer normalized: Layer normalizing the input data as the number of features increases over time
+        # 2. Fed through the attention network: We get the attention scores or weighted values
+        # 3. Added to the input: Reduces vanishing gradient issues
+        attn_output = self.attn(self.ln_1(x))
+        x = x + attn_output
+        
+        # 4. Layer normalized the data again
+        # 5. Final pass through a multi-layer perceptron: We are learning the features
+        # 6. Added to the input again
+        mlp_output = self.mlp(self.ln_2(x))
+        x = x + mlp_output
 
+        return x
