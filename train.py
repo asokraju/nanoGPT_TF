@@ -12,6 +12,7 @@ class GPTConfig:
     n_embd: int = 768 # embedding size of the input
     dropout: float = 0.0
     bias: bool = True  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    epsilon: float = 1e-5 # epsilon value of layer normalization
 
 class MultiHeadAttention(layers.Layer):
     def __init__(self, config):
@@ -79,3 +80,24 @@ class MLP(layers.Layer):
         x = self.c_proj(x)
         x = self.dropout(x)
         return x
+
+class Block(layers.Layer):
+    def __init__(self, config):
+        super(Block, self).__init__()
+
+        # Layer normalizing the input data as the number of features increases overtime
+        self.ln_1 = tf.keras.layers.LayerNormalization(epsilon=config.epsilon, center=False, scale=True)
+        self.attn = MultiHeadAttention(config)
+        self.ln_2 = tf.keras.layers.LayerNormalization(epsilon=config.epsilon, center=False, scale=True)
+        self.mlp = MLP(config)
+    def call(self):
+        # 1. input data is layer normalized : Layer normalizing the input data as the number of features increases overtime
+        # 2. fed through attention network : we get the attention scores or weighted values
+        # 3. added to the input : reduces vanishing gradient issues
+        x = x + self.attn(self.ln_1(x))
+        # 4. again layer normalized the data
+        # 5. final pass through a multi layer perceptron : we are learning the features
+        # 6. again added to tthe input
+        x = x + self.mlp(self.ln_2(x))
+        return x
+
