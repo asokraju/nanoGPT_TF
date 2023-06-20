@@ -2,16 +2,55 @@ import tensorflow as tf
 from tensorflow.keras import layers
 from dataclasses import dataclass
 
+import os
+import pandas as pd
+import argparse
+import numpy as np
+# import matplotlib.pyplot as plt
+from datetime import datetime
+import requests
+
+from tensorflow import shape as tf_shape
+from tensorflow import exp as tf_exp
+from tensorflow import square as tf_square
+from tensorflow import reduce_sum, reduce_mean
+from tensorflow import GradientTape
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.layers import Layer, Input, Dense, Conv2D, Conv2DTranspose, Flatten, Reshape, MaxPooling2D, UpSampling2D, BatchNormalization
+from tensorflow.keras.models import Model
+from tensorflow.keras.metrics import Mean, Metric
+from tensorflow.keras.losses import binary_crossentropy
+from tensorflow.keras.backend import random_normal
+from tensorflow.keras.optimizers import Adam, RMSprop
+from tensorflow.keras.callbacks import Callback
+from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, TensorBoard
+# from tensorflow.keras import saving
+
+
 @dataclass
 class GPTConfig:
-    block_size: int = 1024
-    vocab_size: int = 50304  # GPT-2 vocab_size of 50257, padded up to the nearest multiple of 64 for efficiency
+    block_size: int = 25
+    vocab_size: int = 200  # GPT-2 vocab_size of 50257, padded up to the nearest multiple of 64 for efficiency
     n_layer: int = 12 # number of squential transformers
     n_head: int = 12  # number of attention heads
     n_embd: int = 768  # embedding size of the input
     dropout: float = 0.2 # dropout percentage
     bias: bool = True  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     epsilon: float = 1e-5  # epsilon value of layer normalization
+
+
+def windowed_dataset(series, window_size, batch_size, shuffle_buffer):
+    dataset = tf.data.Dataset.from_tensor_slices(series)
+    dataset = dataset.window(size=window_size+1, shift = 1, drop_remainder=True)
+    dataset = dataset.flat_map(lambda window: window.batch(window_size+1))
+    dataset = dataset.map(lambda x: (x[:-1], x[1:]))
+    dataset = dataset.shuffle(shuffle_buffer)
+    dataset = dataset.batch(batch_size).prefetch(1)
+    return dataset
+
+
+
+
 
 class MultiHeadAttention(layers.Layer):
     def __init__(self, config):
@@ -26,7 +65,7 @@ class MultiHeadAttention(layers.Layer):
         # Regularization
         self.attn_dropout = layers.Dropout(config.dropout)
         self.resid_dropout = layers.Dropout(config.dropout)
-    
+
     def call(self, x):
         B, T, C = x.shape
 
@@ -35,11 +74,14 @@ class MultiHeadAttention(layers.Layer):
 
         # Split the queries, keys, and values
         q, k, v = tf.split(qkv, 3, axis=-1)  # Input shape: (B, T, 3 * n_embd), Output shapes: 3 * (B, T, n_embd)
-
+        
+        
         # Reshape queries, keys, and values for multi-head attention with head_size = n_embd // num_heads
-        q = tf.reshape(q, (B, T, self.num_heads, -1))  # Output shape: (B, T, num_heads, head_size)
-        k = tf.reshape(k, (B, T, self.num_heads, -1))  # Output shape: (B, T, num_heads, head_size)
-        v = tf.reshape(v, (B, T, self.num_heads, -1))  # Output shape: (B, T, num_heads, head_size)
+        # BUG: possible issue with tensorflow, you can use tf.reshape(q, (B, T, self.num_heads, -1)), for tensorflow B is unknown: it will give an error
+        q = tf.reshape(q, (-1, T, self.num_heads, self.head_size))  # Output shape: (B, T, num_heads, head_size)
+        k = tf.reshape(k, (-1, T, self.num_heads, self.head_size))  # Output shape: (B, T, num_heads, head_size)
+        v = tf.reshape(v, (-1, T, self.num_heads, self.head_size))  # Output shape: (B, T, num_heads, head_size)
+
 
         # Perform attention operations
 
@@ -62,7 +104,7 @@ class MultiHeadAttention(layers.Layer):
 
         # Transpose and reshape the output to match the original shape
         out = tf.transpose(out, perm=[0, 2, 1, 3])  # Output shape: (B, T, num_heads, head_size)
-        out = tf.reshape(out, (B, T, -1))  # Output shape: (B, T, C) - note that C = num_heads * head_size = n_embd
+        out = tf.reshape(out, (-1, T, C))  # Output shape: (B, T, C) - note that C = num_heads * head_size = n_embd
         out = self.resid_dropout(out)  # Regularization step 2
         return out
 
@@ -89,222 +131,129 @@ class Block(layers.Layer):
         self.attn = MultiHeadAttention(config)
         self.ln_2 = layers.LayerNormalization(epsilon=config.epsilon, center=False, scale=True)
         self.mlp = MLP(config)
-    
+
     def call(self, x):
         # 1. Input data is layer normalized: Layer normalizing the input data as the number of features increases over time
         x_normalized = self.ln_1(x)
-        
+
         # 2. Fed through the attention network: We get the attention scores or weighted values
         attn_output = self.attn(x_normalized)
-        
+
         # 3. Added to the input: Reduces vanishing gradient issues
         x = x + attn_output
-        
+
         # 4. Layer normalized the data again
         x_normalized = self.ln_2(x)
-        
+
         # 5. Final pass through a multi-layer perceptron: We are learning the features
         mlp_output = self.mlp(x_normalized)
-        
+
         # 6. Added to the input again
         x = x + mlp_output
 
         return x
 
 
+def decoder(config):
+    """
+    Creates an decoder model based on the provided configuration.
 
-class GPT(tf.keras.Model):
-    def __init__(self, config):
-        super(GPT, self).__init__()
-        assert config.vocab_size is not None
-        assert config.block_size is not None
-        self.config = config
+    Args:
+        config: An object specifying the configuration parameters.
 
-        self.transformer = tf.keras.layers.LayerDict({
-            # word token embeddings
-            'wte': tf.keras.layers.Embedding(config.vocab_size, config.n_embd, input_length=config.block_size), 
-            # word position embeddiings
-            'wpe': tf.keras.layers.Embedding(config.block_size, config.n_embd),
-            # dropoutt layer
-            'drop': tf.keras.layers.Dropout(config.dropout),
-            # Transformer blocks
-            'h': tf.keras.Sequential([Block(config) for _ in range(config.n_layer)]),
-            # layer normalization
-            'ln_f': tf.keras.layers.LayerNormalization(epsilon=config.epsilon, center=False, scale=True)
-        })
+    Returns:
+        decoder: A Keras Model object representing the encoder model.
+    """
 
-        # layer is used to project the output of the GPT model to the vocabulary size
-        self.lm_head = tf.keras.layers.Dense(config.vocab_size, use_bias=False)
+    # create a dict with all the layers we need
+    transformer_dict = {
+        # input layer
+        'input': tf.keras.Input(shape=(config.block_size,)),
+        # word token embeddings
+        'wte': tf.keras.layers.Embedding(config.vocab_size, config.n_embd, input_length=config.block_size),
+        # word position embeddings
+        'wpe': tf.keras.layers.Embedding(config.block_size, config.n_embd),
+        # dropout layer
+        'drop': tf.keras.layers.Dropout(config.dropout),
+        # Transformer blocks
+        'h': tf.keras.Sequential([Block(config) for _ in range(config.n_layer)]),
+        # layer normalization
+        'ln_f': tf.keras.layers.LayerNormalization(epsilon=config.epsilon, center=False, scale=True),
+        # layer used to project the output of the GPT model to the vocabulary size
+        'lm_head': tf.keras.layers.Dense(config.vocab_size, use_bias=False)
+    }
 
-        # sets the weights of the embedding layer (wte) in the transformer to be the transpose of the weights of the lm_head layer. 
-        # This is done to initialize the embedding layer with the same weights as the lm_head layer, 
-        # which helps in aligning the embeddings with the output projection. 
-        # The transpose operation is necessary because the shapes of the weights in the lm_head layer and 
-        # the embedding layer have different dimensions, and the transpose operation ensures compatibility between them.
-        self.transformer['wte'].set_weights([self.lm_head.get_weights()[0].T])
+    # input
+    idx = transformer_dict['input']
+    pos = tf.range(0, config.block_size, dtype=tf.int64)  # shape (t)
 
-        self._init_weights()
+    # Forward the GPT model itself
+    tok_emb = transformer_dict['wte'](idx)  # token embeddings of shape (b, t, n_embd)
+    pos_emb = transformer_dict['wpe'](pos)  # position embeddings of shape (t, n_embd)
+    x = transformer_dict['drop'](tok_emb + pos_emb)
+    for block in transformer_dict['h'].layers:
+        x = block(x)
+    x = transformer_dict['ln_f'](x)
 
-        num_params = self.get_num_params()
-        print(f"number of parameters: {num_params / 1e6:.2f}M")
+    # logit scores for each vocabulary word at each position in the input sequence.
+    logits = transformer_dict['lm_head'](x)  # shape (batch_size, sequence_length, vocab_size)
 
-    def get_num_params(self, non_embedding=True):
-        n_params = sum(tf.reduce_prod(p.shape) for p in self.trainable_variables)
-        if non_embedding:
-            n_params -= tf.reduce_prod(self.transformer['wpe'].weights[0].shape)
-        return n_params
+    # Create encoder model
+    model = tf.keras.Model(inputs=idx, outputs=logits, name='encoder')
 
-    def _init_weights(self):
-        for module in self.trainable_variables:
-            if isinstance(module, tf.keras.layers.Dense):
-                module.kernel_initializer = tf.keras.initializers.RandomNormal(mean=0.0, stddev=0.02)
-                if module.use_bias:
-                    module.bias_initializer = tf.keras.initializers.Zeros()
-            elif isinstance(module, tf.keras.layers.Embedding):
-                module.embeddings_initializer = tf.keras.initializers.RandomNormal(mean=0.0, stddev=0.02)
+    return model
 
-    def call(self, idx, targets=None):
-        b, t = idx.shape # shape  is b, t
-        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
-        pos = tf.range(0, t, dtype=tf.int64)  # shape (t)
 
-        # Forward the GPT model itself
-        tok_emb = self.transformer['wte'](idx)  # token embeddings of shape (b, t, n_embd)
-        pos_emb = self.transformer['wpe'](pos)  # position embeddings of shape (t, n_embd)
-        x = self.transformer['drop'](tok_emb + pos_emb)
-        for block in self.transformer['h'].layers:
-            x = block(x)
-        x = self.transformer['ln_f'](x)
+if __name__ == '__main__':
+    config = GPTConfig
+    # We always start with a dataset to train on. Let's download the tiny shakespeare dataset
+    url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+    response = requests.get(url)
 
-        if targets is not None:
-            # If we are given some desired targets, also calculate the loss
+    # Ensure we got a valid response
+    if response.status_code == 200:
+        # Open file and write the content
+        with open('input.txt', 'w') as file:
+            file.write(response.text)
+    else:
+        print(f"Failed to get file with status code: {response.status_code}")
 
-            # logit scores for each vocabulary word at each position in the input sequence.
-            logits = self.lm_head(x) # shape (batch_size, sequence_length, vocab_size)
-
-            loss = tf.keras.losses.sparse_categorical_crossentropy(targets, logits, from_logits=True)
-        else:
-            # Inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.lm_head(x[:, -1, :]) # shape (b,)
-            loss = None
-
-        return logits, loss
-
-    def crop_block_size(self, block_size):
-        # Model surgery to decrease the block size if necessary
-        # E.g., we may load the GPT2 pretrained model checkpoint (block size 1024)
-        # but want to use a smaller block size for some smaller, simpler model
-        assert block_size <= self.config.block_size
-        self.config.block_size = block_size
-        # adjusts the weights of the 'wpe' embedding layer in the self.transformer model by cropping them to match the desired block_size.
-        self.transformer['wpe'].set_weights([self.transformer['wpe'].get_weights()[0][:block_size]])
-
-    @classmethod
-    def from_pretrained(cls, model_type, override_args=None):
-        assert model_type in {'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}
-        override_args = override_args or {}  # default to empty dict
-        # only dropout can be overridden, see more notes below
-        assert all(k == 'dropout' for k in override_args)
-
-        # GPT2 model configurations
-        config_args = {
-            'gpt2': dict(n_layer=12, n_head=12, n_embd=768),  # 124M params
-            'gpt2-medium': dict(n_layer=24, n_head=16, n_embd=1024),  # 350M params
-            'gpt2-large': dict(n_layer=36, n_head=20, n_embd=1280),  # 774M params
-            'gpt2-xl': dict(n_layer=48, n_head=25, n_embd=1600),  # 1558M params
-        }[model_type]
-
-        # Override default arguments
-        config_args['vocab_size'] = 50257  # always 50257 for GPT model checkpoints
-        config_args['block_size'] = 1024  # always 1024 for GPT model checkpoints
-        config_args['bias'] = True  # always True for GPT model checkpoints
-
-        # Create a GPTConfig object
-        config = GPTConfig(**config_args)
-
-        # Create an instance of the GPT model
-        model = cls(config)
-
-        # Load the pretrained weights
-        if model_type.startswith('gpt2'):
-            checkpoint_path = 'path_to_pretrained_checkpoint'
-            model.load_weights(checkpoint_path)
-
-        return model
-
-    def configure_optimizers(self, weight_decay, learning_rate, betas):
-        decay_params = []
-        nodecay_params = []
-        # Create optim groups. Any parameters that are 2D will be weight decayed, otherwise not.
-        # i.e., all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
-        for var in self.model.trainable_variables:
-            if var.shape.ndims >= 2:
-                decay_params.append(var)
-            else:
-                nodecay_params.append(var)
-
-        optim_groups = [
-            {'params': decay_params, 'weight_decay': weight_decay},
-            {'params': nodecay_params, 'weight_decay': 0.0}
-        ]
-        num_decay_params = sum(tf.reduce_prod(tf.shape(p)) for p in decay_params)
-        num_nodecay_params = sum(tf.reduce_prod(tf.shape(p)) for p in nodecay_params)
-        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
-        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
-        optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate, beta_1=betas[0], beta_2=betas[1])
-        return optimizer
+    # Read in the file to inspect it
+    with open('input.txt', 'r', encoding='utf-8') as f:
+        text = f.read()
+    
+    # Rest of your code...
 
 
 
-    def estimate_mfu(self, fwdbwd_per_iter, dt):
-        """Estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS"""
-        # First estimate the number of flops we do per iteration
-        # See PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
-        N = self.get_num_params()
-        cfg = self.config
-        L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embd // cfg.n_head, cfg.block_size
-        flops_per_token = 6 * N + 12 * L * H * Q * T
-        flops_per_fwdbwd = flops_per_token * T
-        flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
-        # Express our flops throughput as a ratio of A100 bfloat16 peak flops
-        flops_achieved = flops_per_iter * (1.0 / dt)  # per second
-        flops_promised = 312e12  # A100 GPU bfloat16 peak flops is 312 TFLOPS
-        mfu = flops_achieved / flops_promised
-        return mfu
+    chars = sorted(list(set(text)))
+    vocab_size = len(chars)
+    print("".join(chars))
+    print(vocab_size)
 
-    @tf.function
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
-        """
-        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
-        the sequence max_new_tokens times, feeding the predictions back into the model each time.
-        Most likely you'll want to make sure to be in model.eval() mode of operation for this.
-        """
-        for _ in tf.range(max_new_tokens):
-            # If the sequence context is growing too long, we must crop it at block_size
-            if idx.shape[1] <= self.config.block_size:
-                idx_cond = idx
-            else:
-                idx_cond = idx[:, -self.config.block_size:]
 
-            # Forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
+    stoi = {ch:i for i, ch in enumerate(chars)}
+    itos = {i:ch for i, ch in enumerate(chars)}
+    encode = lambda s: [stoi[ch] for ch in s] # takes a string and converts into numerals
+    decode = lambda l: "".join([itos[i] for i in l]) # takes a list of integers and converts them to a string
+    print(encode("hii I am Krishna"))
+    decode(encode("hii I am Krishna"))
 
-            # Pluck the logits at the final step and scale by desired temperature
-            logits = logits[:, -1, :] / temperature
 
-            # Optionally crop the logits to only the top k options
-            if top_k is not None:
-                _, top_indices = tf.math.top_k(logits, k=min(top_k, logits.shape[-1]))
-                mask = tf.broadcast_to(top_indices[:, -1:], logits.shape)
-                logits = tf.where(logits < mask, float("-inf"), logits)
+    series = encode(text)
+    n = int(0.8*len(series))
+    train_dataset = windowed_dataset(series[:n], config.block_size, batch_size=250, shuffle_buffer=10)
+    test_dataset = windowed_dataset(series[n:], config.block_size, batch_size=250, shuffle_buffer=10)
 
-            # Apply softmax to convert logits to (normalized) probabilities
-            probs = tf.nn.softmax(logits, axis=-1)
+    
 
-            # Sample from the distribution
-            idx_next = tf.random.categorical(probs, num_samples=1, dtype=tf.int32)
+    # Create the decoder model
+    decoder_model = decoder(config)
 
-            # Append sampled index to the running sequence and continue
-            idx = tf.concat((idx, idx_next), axis=1)
+    # Compile and train the model
+    optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
+    loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+    epochs = 10
 
-        return idx
+    decoder_model.compile(optimizer=optimizer, loss=loss_fn)
+    history = decoder_model.fit(train_dataset, epochs=epochs, validation_data=test_dataset)

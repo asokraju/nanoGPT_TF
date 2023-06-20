@@ -1,0 +1,11 @@
+version: '3'
+services:
+  nanogpt:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:80"
+    volumes:
+      - ./:/nanogpt
+    command: python train.py
