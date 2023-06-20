@@ -49,7 +49,7 @@ The `GPTConfig` class contains the following fields:
 
 ## Blog Post
 
-For more information about the code and how it works, check out the [related blog post]([#](https://www.linkedin.com/pulse/draft/AgGbEHgCsT1H1QAAAYjacWEI9ZTtUvKieD7DBt5ud2NnxIbgU0oG5wySqNWiZBiEtCdnkCs)https://www.linkedin.com/pulse/draft/AgGbEHgCsT1H1QAAAYjacWEI9ZTtUvKieD7DBt5ud2NnxIbgU0oG5wySqNWiZBiEtCdnkCs).
+For more information about the code and how it works, check out the [LinkedIn post](https://www.linkedin.com/pulse/decoding-transformers-dive-gpt-tensorflow-krishna-chaitanya-kosaraju)
 
 
 
