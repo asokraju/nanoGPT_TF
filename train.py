@@ -38,15 +38,61 @@ class GPTConfig:
     bias: bool = True  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     epsilon: float = 1e-5  # epsilon value of layer normalization
 
+# Function to download the dataset
+def text_extractor(url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"):
+    # Request to fetch the tiny shakespeare dataset
+    response = requests.get(url)
+    # Checking if we got a valid response
+    if response.status_code == 200:
+        # Opening a file and writing the content of the response
+        with open('input.txt', 'w') as file:
+            file.write(response.text)
+    else:
+        print(f"Failed to get file with status code: {response.status_code}")
+    # Reading the downloaded file
+    with open('input.txt', 'r', encoding='utf-8') as f:
+        text = f.read()
+    return text
 
+# Function to encode the text into numbers
+def text_encoder(text):
+    # Listing and sorting the unique characters in the text
+    chars = sorted(list(set(text)))
+    # Getting the total number of unique characters
+    vocab_size = len(chars)
+    print("".join(chars))
+    print(vocab_size)
+    # Creating mappings from characters to their corresponding numerical representations
+    stoi = {ch:i for i, ch in enumerate(chars)}
+    # Creating mappings from numbers to their corresponding characters
+    itos = {i:ch for i, ch in enumerate(chars)}
+    # Function to encode a string into a list of numbers
+    encode = lambda s: [stoi[ch] for ch in s]
+    # Function to decode a list of numbers back into a string
+    decode = lambda l: "".join([itos[i] for i in l])
+    print(encode("hii I am Krishna"))
+    print("decoded: ", decode(encode("hii I am Krishna")))
+    # Encoding the entire text into numbers
+    series = encode(text)
+    n = int(0.8*len(series))
+    return series
+
+# Function to create a windowed dataset
 def windowed_dataset(series, window_size, batch_size, shuffle_buffer):
+    # Creating a tensorflow dataset from the encoded series
     dataset = tf.data.Dataset.from_tensor_slices(series)
+    # Creating a windowed dataset with each window of size window_size + 1 and shifting the window by 1 after each step
     dataset = dataset.window(size=window_size+1, shift = 1, drop_remainder=True)
+    # Flattening the dataset
     dataset = dataset.flat_map(lambda window: window.batch(window_size+1))
+    # Splitting each window into features (all elements except the last) and target (the last element)
     dataset = dataset.map(lambda x: (x[:-1], x[1:]))
+    # Shuffling the dataset
     dataset = dataset.shuffle(shuffle_buffer)
+    # Batching the dataset and prefetching 1 batch at a time to improve performance
     dataset = dataset.batch(batch_size).prefetch(1)
     return dataset
+
 
 
 
@@ -206,42 +252,9 @@ def decoder(config):
 
 if __name__ == '__main__':
     config = GPTConfig
-    # We always start with a dataset to train on. Let's download the tiny shakespeare dataset
-    url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
-    response = requests.get(url)
-
-    # Ensure we got a valid response
-    if response.status_code == 200:
-        # Open file and write the content
-        with open('input.txt', 'w') as file:
-            file.write(response.text)
-    else:
-        print(f"Failed to get file with status code: {response.status_code}")
-
-    # Read in the file to inspect it
-    with open('input.txt', 'r', encoding='utf-8') as f:
-        text = f.read()
-    
-    # Rest of your code...
-
-
-
-    chars = sorted(list(set(text)))
-    vocab_size = len(chars)
-    print("".join(chars))
-    print(vocab_size)
-
-
-    stoi = {ch:i for i, ch in enumerate(chars)}
-    itos = {i:ch for i, ch in enumerate(chars)}
-    encode = lambda s: [stoi[ch] for ch in s] # takes a string and converts into numerals
-    decode = lambda l: "".join([itos[i] for i in l]) # takes a list of integers and converts them to a string
-    print(encode("hii I am Krishna"))
-    decode(encode("hii I am Krishna"))
-
-
-    series = encode(text)
-    n = int(0.8*len(series))
+    text = text_extractor()
+    series = text_encoder(text)
+    n = len(series)
     train_dataset = windowed_dataset(series[:n], config.block_size, batch_size=250, shuffle_buffer=10)
     test_dataset = windowed_dataset(series[n:], config.block_size, batch_size=250, shuffle_buffer=10)
 
