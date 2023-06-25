@@ -254,7 +254,7 @@ if __name__ == '__main__':
     config = GPTConfig
     text = text_extractor()
     series = text_encoder(text)
-    n = len(series)
+    n = int(0.8*len(series))
     train_dataset = windowed_dataset(series[:n], config.block_size, batch_size=250, shuffle_buffer=10)
     test_dataset = windowed_dataset(series[n:], config.block_size, batch_size=250, shuffle_buffer=10)
 
