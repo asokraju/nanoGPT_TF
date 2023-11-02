@@ -1,5 +1,5 @@
 # nanoGPT
- # TensorFlow GPT-4 Model
+ # TensorFlow GPT-2 Model
 
 This repository contains the implementation of nanoGPT in TensorFlow. This is a conversion of the original PyTorch code from `nanoGPT` library by [Andery Karpathy](https://github.com/karpathy/nanoGPT). Special thanks to him and all contributors who made this possible.
 
